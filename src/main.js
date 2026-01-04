@@ -1,34 +1,25 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
-import * as cheerio from 'cheerio';
+import { PlaywrightCrawler, Dataset } from 'crawlee';
 
 // ----------------- Constants -----------------
 
-const JOBS_PER_PAGE = 20;
 const BASE_URL = 'https://www.rozee.pk';
+const SITEMAP_URL = 'https://www.rozee.pk/sitemap/jobs.xml';
+const JOBS_PER_PAGE = 20;
 
-// User-Agent rotation pool for stealth
+// User-Agent rotation pool
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ];
 
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const randomDelay = (min = 200, max = 600) => Math.floor(Math.random() * (max - min)) + min;
 
 // ----------------- Helpers -----------------
-
-const toAbs = (href, base = BASE_URL) => {
-    try {
-        return new URL(href, base).href;
-    } catch {
-        return null;
-    }
-};
 
 const cleanText = (text) => {
     if (!text) return '';
@@ -49,7 +40,7 @@ const extractJobIdFromUrl = (url) => {
     }
 };
 
-// Build search URL with correct pagination pattern: /fpn/{offset}
+// Build search URL with correct pagination pattern
 const buildSearchUrl = (keyword, page = 1) => {
     const kw = keyword?.trim() || 'all';
     const encodedKw = encodeURIComponent(kw);
@@ -60,19 +51,16 @@ const buildSearchUrl = (keyword, page = 1) => {
     return `${BASE_URL}/job/jsearch/q/${encodedKw}/fpn/${offset}`;
 };
 
-// Convert description HTML to plain text
 const htmlToText = (html) => {
     if (!html) return '';
     let text = html;
     text = text.replace(/<\s*br\s*\/?>/gi, '\n');
     text = text.replace(/<\/\s*(p|div|li|h[1-6])\s*>/gi, '\n');
     text = text.replace(/<[^>]+>/g, ' ');
-    text = text.replace(/\r/g, '');
     text = text.replace(/\n\s*\n+/g, '\n\n');
     return cleanText(text);
 };
 
-// Normalize location
 const normalizeLocation = (loc) => {
     if (!loc) return '';
     const parts = loc
@@ -91,57 +79,12 @@ const normalizeLocation = (loc) => {
     return unique.slice(0, 3).join(', ');
 };
 
-// Parse JSON-LD JobPosting from HTML
-const parseJsonLd = ($) => {
-    const result = {};
-    try {
-        $('script[type="application/ld+json"]').each((_, el) => {
-            try {
-                const json = JSON.parse($(el).html());
-                const items = Array.isArray(json) ? json : [json];
-                for (const item of items) {
-                    if (item['@type'] === 'JobPosting') {
-                        result.title = result.title || item.title || null;
-
-                        if (item.hiringOrganization) {
-                            const org = item.hiringOrganization;
-                            result.company = result.company || (typeof org === 'string' ? org : org.name) || null;
-                        }
-
-                        if (item.jobLocation && !result.location) {
-                            const jobLoc = Array.isArray(item.jobLocation) ? item.jobLocation[0] : item.jobLocation;
-                            const addr = jobLoc?.address;
-                            if (addr) {
-                                const parts = [addr.addressLocality, addr.addressRegion, addr.addressCountry].filter(Boolean);
-                                result.location = parts.join(', ');
-                            }
-                        }
-
-                        if (item.baseSalary && !result.salary) {
-                            const val = item.baseSalary.value;
-                            if (val && typeof val === 'object') {
-                                const { minValue, maxValue, value, currency } = val;
-                                const range = minValue && maxValue ? `${minValue}–${maxValue}` : value ?? minValue ?? maxValue;
-                                result.salary = `${currency || ''} ${range || ''}`.trim();
-                            } else if (val) {
-                                result.salary = String(val);
-                            }
-                        }
-
-                        result.contract_type = result.contract_type || item.employmentType || null;
-                        result.description_html = result.description_html || item.description || null;
-                        result.date_posted = result.date_posted || item.datePosted || null;
-                        result.valid_through = result.valid_through || item.validThrough || null;
-                    }
-                }
-            } catch {
-                // Skip invalid JSON
-            }
-        });
-    } catch {
-        // Ignore JSON-LD parse errors
-    }
-    return result;
+// Filter job URL by keyword
+const matchesKeyword = (url, keyword) => {
+    if (!keyword || !keyword.trim()) return true;
+    const urlLower = url.toLowerCase();
+    const keywords = keyword.toLowerCase().split(/\s+/);
+    return keywords.some((kw) => urlLower.includes(kw));
 };
 
 // ----------------- MAIN -----------------
@@ -166,75 +109,140 @@ Actor.main(async () => {
     const MAX_PAGES = parseNumber(MAX_PAGES_RAW, 50);
 
     const requestQueue = await Actor.openRequestQueue();
+    const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
-    // Build start requests
-    if (Array.isArray(startUrls) && startUrls.length > 0) {
-        for (const req of startUrls) {
-            if (!req?.url) continue;
-            await requestQueue.addRequest({
-                url: req.url,
-                userData: { label: 'LIST', pageNo: 1 },
-            });
-        }
-    } else if (typeof startUrl === 'string' && startUrl.trim()) {
+    // Tracking
+    let saved = 0;
+    const seenJobIds = new Set();
+
+    log.info(`🚀 RozeePk Scraper starting | target=${RESULTS_WANTED}`);
+
+    // Strategy: Use sitemap for broad searches, direct search for specific keywords
+    const useStartUrl = startUrl || url || (Array.isArray(startUrls) && startUrls[0]?.url);
+
+    if (useStartUrl) {
+        // Direct URL provided - use LIST mode
         await requestQueue.addRequest({
-            url: startUrl.trim(),
+            url: typeof useStartUrl === 'string' ? useStartUrl : useStartUrl,
             userData: { label: 'LIST', pageNo: 1 },
         });
-    } else if (typeof url === 'string' && url.trim()) {
-        await requestQueue.addRequest({
-            url: url.trim(),
-            userData: { label: 'LIST', pageNo: 1 },
-        });
-    } else {
+    } else if (keyword && keyword.trim()) {
+        // Keyword search - start with search page
         const searchUrl = buildSearchUrl(keyword, 1);
         await requestQueue.addRequest({
             url: searchUrl,
             userData: { label: 'LIST', pageNo: 1, keyword },
         });
+    } else {
+        // No keyword - use sitemap for all jobs
+        await requestQueue.addRequest({
+            url: SITEMAP_URL,
+            userData: { label: 'SITEMAP' },
+        });
     }
 
-    // Proxy configuration
-    const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
-
-    // Tracking
-    let saved = 0;
-    let detailEnqueued = 0;
-    const seenJobIds = new Set();
-
-    log.info(`🚀 RozeePk Scraper starting | target=${RESULTS_WANTED}, maxPages=${MAX_PAGES}`);
-
-    const crawler = new CheerioCrawler({
+    const crawler = new PlaywrightCrawler({
         requestQueue,
         proxyConfiguration: proxyConfig,
 
-        // Fast HTTP-only requests
-        maxConcurrency: 10,
-        minConcurrency: 3,
-        maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 30,
+        launchContext: {
+            launchOptions: {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-background-networking',
+                    '--disable-default-apps',
+                    '--disable-extensions',
+                    '--disable-sync',
+                    '--metrics-recording-only',
+                    '--no-first-run',
+                ],
+            },
+        },
 
-        // Stealth headers
-        additionalMimeTypes: ['application/json'],
+        useSessionPool: true,
+        persistCookiesPerSession: true,
+        sessionPoolOptions: {
+            maxPoolSize: 5,
+            sessionOptions: { maxUsageCount: 30 },
+        },
+
+        maxConcurrency: 5,
+        minConcurrency: 1,
+        maxRequestRetries: 2,
+        navigationTimeoutSecs: 25,
+        requestHandlerTimeoutSecs: 45,
+
         preNavigationHooks: [
-            async ({ request }) => {
-                request.headers = {
-                    'User-Agent': getRandomUserAgent(),
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            async ({ page }, gotoOptions) => {
+                const ua = getRandomUserAgent();
+                await page.setExtraHTTPHeaders({
+                    'User-Agent': ua,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Cache-Control': 'max-age=0',
-                };
+                });
+
+                await page.setViewportSize({
+                    width: 1280 + Math.floor(Math.random() * 200),
+                    height: 720 + Math.floor(Math.random() * 200),
+                });
+
+                // Block heavy resources
+                await page.route('**/*', (route) => {
+                    const type = route.request().resourceType();
+                    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+                        return route.abort();
+                    }
+                    return route.continue();
+                });
+
+                gotoOptions.waitUntil = 'domcontentloaded';
             },
         ],
 
-        requestHandler: async ({ $, request, log: crawlerLog }) => {
+        requestHandler: async ({ page, request, log: crawlerLog }) => {
             const label = request.userData.label || 'LIST';
 
-            // Early exit if target reached
             if (saved >= RESULTS_WANTED) {
+                crawlerLog.debug('Target reached, skipping.');
+                return;
+            }
+
+            await page.waitForTimeout(randomDelay(200, 500));
+
+            // ----- SITEMAP -----
+            if (label === 'SITEMAP') {
+                crawlerLog.info('📥 Fetching sitemap...');
+
+                const content = await page.content();
+                const urlMatches = content.match(/<loc>(https:\/\/www\.rozee\.pk\/[^<]+jobs-\d+)<\/loc>/gi) || [];
+
+                const jobUrls = urlMatches
+                    .map((m) => m.replace(/<\/?loc>/gi, ''))
+                    .filter((url) => matchesKeyword(url, keyword));
+
+                crawlerLog.info(`📄 Sitemap: found ${jobUrls.length} job URLs matching "${keyword || 'all'}"`);
+
+                let enqueued = 0;
+                for (const jobUrl of jobUrls) {
+                    if (saved + enqueued >= RESULTS_WANTED) break;
+
+                    const jobId = extractJobIdFromUrl(jobUrl);
+                    if (!jobId || seenJobIds.has(jobId)) continue;
+
+                    seenJobIds.add(jobId);
+
+                    await requestQueue.addRequest({
+                        url: jobUrl,
+                        userData: { label: 'DETAIL', jobId },
+                        uniqueKey: `detail-${jobId}`,
+                    });
+                    enqueued++;
+                }
+
+                crawlerLog.info(`📄 Enqueued ${enqueued} detail pages from sitemap`);
                 return;
             }
 
@@ -243,56 +251,58 @@ Actor.main(async () => {
                 const pageNo = request.userData.pageNo || 1;
                 const kw = request.userData.keyword || keyword || '';
 
+                await page.waitForLoadState('domcontentloaded');
+
                 // Check for blocking
-                const bodyText = $('body').text().toLowerCase();
-                if (bodyText.includes('forbidden') || bodyText.includes('access denied') || bodyText.includes('blocked')) {
-                    crawlerLog.warning(`🚫 Page blocked: ${request.url}`);
-                    throw new Error('Page blocked - will retry');
+                const isBlocked = await page.evaluate(() => {
+                    const text = document.body?.innerText?.toLowerCase() || '';
+                    return text.includes('forbidden') || text.includes('access denied') || text.includes('blocked');
+                });
+
+                if (isBlocked) {
+                    crawlerLog.warning(`🚫 Blocked: ${request.url}`);
+                    throw new Error('Blocked - will retry');
                 }
 
                 // Extract job URLs
-                const jobUrls = [];
-                $('a[href*="-jobs-"]').each((_, el) => {
-                    const href = $(el).attr('href');
-                    if (href && /-jobs-\d+/i.test(href)) {
-                        const absUrl = toAbs(href, request.url);
-                        if (absUrl && !jobUrls.includes(absUrl)) {
-                            jobUrls.push(absUrl);
+                const jobUrls = await page.$$eval('a[href*="-jobs-"]', (anchors) => {
+                    const urls = new Set();
+                    for (const a of anchors) {
+                        const href = a.getAttribute('href') || '';
+                        if (/-jobs-\d+/i.test(href)) {
+                            try {
+                                urls.add(new URL(href, window.location.origin).href);
+                            } catch { }
                         }
                     }
+                    return Array.from(urls);
                 });
 
-                // Enqueue detail pages
-                let newDetails = 0;
-                for (const absUrl of jobUrls) {
-                    if (saved + detailEnqueued >= RESULTS_WANTED) break;
+                let enqueued = 0;
+                for (const jobUrl of jobUrls) {
+                    if (saved + enqueued >= RESULTS_WANTED) break;
 
-                    const jobId = extractJobIdFromUrl(absUrl);
+                    const jobId = extractJobIdFromUrl(jobUrl);
                     if (!jobId || seenJobIds.has(jobId)) continue;
 
                     seenJobIds.add(jobId);
 
                     await requestQueue.addRequest({
-                        url: absUrl,
+                        url: jobUrl,
                         userData: { label: 'DETAIL', jobId },
-                        uniqueKey: `detail-${jobId}`,
                     });
-
-                    detailEnqueued++;
-                    newDetails++;
+                    enqueued++;
                 }
 
-                crawlerLog.info(`📄 LIST #${pageNo} | found=${jobUrls.length}, enqueued=${newDetails}, saved=${saved}`);
+                crawlerLog.info(`📄 LIST #${pageNo} | found=${jobUrls.length}, enqueued=${enqueued}, saved=${saved}`);
 
-                // Pagination - use correct /fpn/{offset} pattern
-                if (pageNo < MAX_PAGES && saved + detailEnqueued < RESULTS_WANTED && jobUrls.length > 0) {
-                    const nextPageNo = pageNo + 1;
-                    const nextUrl = buildSearchUrl(kw, nextPageNo);
-
+                // Pagination
+                if (pageNo < MAX_PAGES && saved + enqueued < RESULTS_WANTED && jobUrls.length > 0) {
+                    const nextUrl = buildSearchUrl(kw, pageNo + 1);
                     await requestQueue.addRequest({
                         url: nextUrl,
-                        userData: { label: 'LIST', pageNo: nextPageNo, keyword: kw },
-                        uniqueKey: `list-${nextPageNo}`,
+                        userData: { label: 'LIST', pageNo: pageNo + 1, keyword: kw },
+                        uniqueKey: `list-${pageNo + 1}`,
                     });
                 }
 
@@ -303,34 +313,75 @@ Actor.main(async () => {
             if (label === 'DETAIL') {
                 if (saved >= RESULTS_WANTED) return;
 
-                // Try JSON-LD first (most reliable)
-                const jsonLdData = parseJsonLd($);
+                await page.waitForLoadState('domcontentloaded');
 
-                // Fallback to HTML parsing
-                const htmlData = {
-                    title: cleanText($('h1').first().text() || $('h2').first().text() || $('.job-title').text()),
-                    company: cleanText($('.company-name').text() || $('.cp-name').text() || $('[itemprop="hiringOrganization"]').text()),
-                    location: cleanText($('.location').text() || $('.job-location').text() || $('[itemprop="jobLocation"]').text()),
-                    description_html: $('.job-description').html() || $('#job-description').html() || $('[itemprop="description"]').html(),
-                    salary: cleanText($('.salary').text() || $('.job-salary').text()),
-                    contract_type: cleanText($('.job-type').text() || $('.employment-type').text()),
-                };
+                // Extract JSON-LD first (most reliable)
+                const jobData = await page.evaluate(() => {
+                    const result = {};
 
-                // Merge data (JSON-LD takes priority)
-                const merged = {
-                    title: jsonLdData.title || htmlData.title,
-                    company: jsonLdData.company || htmlData.company,
-                    location: jsonLdData.location || htmlData.location,
-                    salary: jsonLdData.salary || htmlData.salary,
-                    contract_type: jsonLdData.contract_type || htmlData.contract_type,
-                    description_html: jsonLdData.description_html || htmlData.description_html,
-                    date_posted: jsonLdData.date_posted,
-                    valid_through: jsonLdData.valid_through,
-                };
+                    // JSON-LD extraction
+                    try {
+                        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+                        for (const script of scripts) {
+                            try {
+                                const json = JSON.parse(script.textContent);
+                                const items = Array.isArray(json) ? json : [json];
+                                for (const item of items) {
+                                    if (item['@type'] === 'JobPosting') {
+                                        result.title = item.title || null;
 
-                // Skip if no title
-                if (!merged.title) {
-                    crawlerLog.debug(`Skipping - no title: ${request.url}`);
+                                        if (item.hiringOrganization) {
+                                            const org = item.hiringOrganization;
+                                            result.company = typeof org === 'string' ? org : org.name || null;
+                                        }
+
+                                        if (item.jobLocation) {
+                                            const loc = Array.isArray(item.jobLocation) ? item.jobLocation[0] : item.jobLocation;
+                                            const addr = loc?.address;
+                                            if (addr) {
+                                                result.location = [addr.addressLocality, addr.addressRegion, addr.addressCountry].filter(Boolean).join(', ');
+                                            }
+                                        }
+
+                                        if (item.baseSalary?.value) {
+                                            const val = item.baseSalary.value;
+                                            if (typeof val === 'object') {
+                                                const { minValue, maxValue, currency } = val;
+                                                result.salary = `${currency || ''} ${minValue && maxValue ? `${minValue}–${maxValue}` : minValue || maxValue || ''}`.trim();
+                                            } else {
+                                                result.salary = String(val);
+                                            }
+                                        }
+
+                                        result.contract_type = item.employmentType || null;
+                                        result.description = item.description || null;
+                                        result.date_posted = item.datePosted || null;
+                                        result.valid_through = item.validThrough || null;
+                                    }
+                                }
+                            } catch { }
+                        }
+                    } catch { }
+
+                    // HTML fallback
+                    if (!result.title) {
+                        result.title = document.querySelector('h1')?.textContent?.trim() || null;
+                    }
+                    if (!result.company) {
+                        result.company = document.querySelector('.company-name, .cp-name')?.textContent?.trim() || null;
+                    }
+                    if (!result.location) {
+                        result.location = document.querySelector('.location, .job-location')?.textContent?.trim() || null;
+                    }
+                    if (!result.description) {
+                        result.description = document.querySelector('.job-description, #job-description')?.innerHTML || null;
+                    }
+
+                    return result;
+                });
+
+                if (!jobData.title) {
+                    crawlerLog.debug(`No title found: ${request.url}`);
                     return;
                 }
 
@@ -338,26 +389,24 @@ Actor.main(async () => {
                     source: 'rozee.pk',
                     job_id: request.userData.jobId || extractJobIdFromUrl(request.url),
                     url: request.url,
-                    title: merged.title,
-                    company: merged.company || null,
-                    location: normalizeLocation(merged.location),
-                    salary: merged.salary || null,
-                    contract_type: merged.contract_type || null,
-                    description_html: merged.description_html || null,
-                    description_text: htmlToText(merged.description_html || ''),
-                    date_posted: merged.date_posted || null,
-                    valid_through: merged.valid_through || null,
+                    title: cleanText(jobData.title),
+                    company: cleanText(jobData.company) || null,
+                    location: normalizeLocation(jobData.location),
+                    salary: cleanText(jobData.salary) || null,
+                    contract_type: cleanText(jobData.contract_type) || null,
+                    description_html: jobData.description || null,
+                    description_text: htmlToText(jobData.description || ''),
+                    date_posted: jobData.date_posted || null,
+                    valid_through: jobData.valid_through || null,
                     scraped_at: new Date().toISOString(),
                 };
 
                 await Dataset.pushData(job);
                 saved++;
 
-                if (saved % 10 === 0 || saved >= RESULTS_WANTED) {
+                if (saved % 10 === 0) {
                     crawlerLog.info(`💾 Saved ${saved} jobs`);
                 }
-
-                return;
             }
         },
 
@@ -368,11 +417,11 @@ Actor.main(async () => {
 
     await crawler.run();
 
-    log.info(`✅ Scraping complete. Total jobs saved: ${saved}`);
+    log.info(`✅ Complete. Total: ${saved} jobs`);
 
     if (saved === 0) {
-        log.warning('⚠️ No jobs scraped. The site may be blocking or structure changed.');
+        log.warning('⚠️ No jobs scraped.');
     } else {
-        log.info(`🎉 Successfully scraped ${saved} jobs from Rozee.pk`);
+        log.info(`🎉 Successfully scraped ${saved} jobs`);
     }
 });

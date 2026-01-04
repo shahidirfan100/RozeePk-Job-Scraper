@@ -1,13 +1,12 @@
 {
-  "name": "rozeepk-jobs-actor",
-  "version": "1.0.0",
-  "description": "RozeePk jobs scraper using Playwright for JavaScript rendering.",
-  "type": "module",
-"dependencies": {
-        "apify": "^3.4.2",
-        "crawlee": "^3.13.8",
-        "playwright": "1.54.1",
-        "cheerio": "^1.0.0-rc.12"
+    "name": "rozeepk-jobs-scraper",
+    "version": "2.0.0",
+    "description": "Fast and stealthy Rozee.pk jobs scraper with JSON-LD extraction, User-Agent rotation, and optimized pagination.",
+    "type": "module",
+    "dependencies": {
+        "apify": "^3.5.2",
+        "crawlee": "^3.15.3",
+        "playwright": "1.56.1"
     },
     "devDependencies": {
         "@apify/eslint-config": "^1.0.0",
@@ -24,6 +23,9 @@
         "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1",
         "postinstall": "npx crawlee install-playwright-browsers"
     },
-    "author": "It's not you it's me",
-    "license": "ISC"
+    "author": "Shahid Irfan",
+    "license": "ISC",
+    "engines": {
+        "node": ">=18.0.0"
+    }
 }

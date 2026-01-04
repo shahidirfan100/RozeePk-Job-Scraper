@@ -1,12 +1,12 @@
 {
     "name": "rozeepk-jobs-scraper",
     "version": "2.0.0",
-    "description": "Fast and stealthy Rozee.pk jobs scraper with JSON-LD extraction, User-Agent rotation, and optimized pagination.",
+    "description": "Fast RozeePk jobs scraper with JSON-LD extraction and stealth features.",
     "type": "module",
     "dependencies": {
         "apify": "^3.5.2",
         "crawlee": "^3.15.3",
-        "playwright": "1.56.1"
+        "cheerio": "^1.0.0-rc.12"
     },
     "devDependencies": {
         "@apify/eslint-config": "^1.0.0",
@@ -20,12 +20,8 @@
         "format:check": "prettier --check .",
         "lint": "eslint",
         "lint:fix": "eslint --fix",
-        "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1",
-        "postinstall": "npx crawlee install-playwright-browsers"
+        "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1"
     },
-    "author": "Shahid Irfan",
-    "license": "ISC",
-    "engines": {
-        "node": ">=18.0.0"
-    }
+    "author": "It's not you it's me",
+    "license": "ISC"
 }

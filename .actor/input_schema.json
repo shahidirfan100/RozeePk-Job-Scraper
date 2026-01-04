@@ -1,23 +1,27 @@
 {
   "title": "RozeePk Jobs Scraper",
-  "description": "Scrape jobs from Rozee.pk. Provide either keyword/location OR a RozeePk search URL. Fast extraction with JSON-LD parsing and stealth features.",
+  "description": "Scrape job listings from Rozee.pk with flexible search options.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrl": {
-      "title": "Start URL",
+      "title": "Start URL (Optional)",
       "type": "string",
-      "description": "Start scraping from a specific RozeePk search URL. If provided, this overrides the Keyword field.",
-      "editor": "textfield",
-      "sectionCaption": "Search Options",
-      "sectionDescription": "Either provide a Start URL OR use the Keyword field below."
+      "description": "Direct RozeePk search URL. Overrides keyword/location if provided.",
+      "editor": "textfield"
     },
     "keyword": {
       "title": "Keyword",
       "type": "string",
-      "description": "Job search keyword(s), e.g., 'Software Developer', 'Marketing Manager'.",
+      "description": "Job search keyword (e.g., 'Software Engineer', 'Marketing Manager').",
       "editor": "textfield",
       "prefill": "software engineer"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Filter by city or region (e.g., 'Lahore', 'Karachi', 'Islamabad').",
+      "editor": "textfield"
     },
     "results_wanted": {
       "title": "Maximum Jobs",
@@ -26,13 +30,12 @@
       "minimum": 1,
       "maximum": 1000,
       "default": 100,
-      "editor": "number",
-      "sectionCaption": "Limits"
+      "editor": "number"
     },
     "max_pages": {
       "title": "Maximum Pages",
       "type": "integer",
-      "description": "Maximum number of search result pages to visit.",
+      "description": "Maximum search result pages to visit.",
       "minimum": 1,
       "maximum": 100,
       "default": 20,
@@ -41,16 +44,14 @@
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Proxy settings for the scraper. Datacenter proxies are recommended.",
+      "description": "Proxy settings. Residential proxies recommended for best results.",
       "editor": "proxy",
       "default": {
         "useApifyProxy": true,
         "apifyProxyGroups": [
           "RESIDENTIAL"
         ]
-      },
-      "sectionCaption": "Advanced",
-      "sectionDescription": "Configure proxy and advanced options."
+      }
     }
   },
   "required": []

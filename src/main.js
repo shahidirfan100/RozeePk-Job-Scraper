@@ -135,158 +135,186 @@ Actor.main(async () => {
     const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
     const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : null;
 
-    log.info(`🚀 RozeePk Hybrid Scraper | target=${RESULTS_WANTED}`);
+    log.info(`🚀 RozeePk Hybrid Scraper | target=${RESULTS_WANTED}, keyword="${keyword || 'all'}"`);
 
-    // ===== STEP 1: Launch Playwright to get cookies =====
-    log.info('🌐 Launching browser to get cookies...');
-
-    const browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
-    });
-
-    const context = await browser.newContext({
-        userAgent: getRandomUserAgent(),
-        viewport: { width: 1280, height: 720 },
-        proxy: proxyUrl ? { server: proxyUrl } : undefined,
-    });
-
-    const page = await context.newPage();
-
-    // Block heavy resources
-    await page.route('**/*', (route) => {
-        const type = route.request().resourceType();
-        if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
-            return route.abort();
-        }
-        return route.continue();
-    });
-
-    // Navigate to get cookies
-    const initUrl = startUrl || buildSearchUrl(keyword, 1);
-    try {
-        await page.goto(initUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(1500);
-    } catch (err) {
-        log.warning(`Browser navigation warning: ${err.message}`);
-    }
-
-    // Extract cookies and headers
-    const cookies = await context.cookies();
-    const cookieString = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-
-    log.info(`🍪 Got ${cookies.length} cookies from browser`);
-
-    // Extract job URLs from initial page if it's a search page
     let jobUrls = [];
     const seenJobIds = new Set();
+    let cookieString = '';
+
+    // ===== STEP 1: Try to get job URLs from sitemap first (fastest) =====
+    log.info('📥 Fetching sitemap (fast method)...');
 
     try {
-        const pageContent = await page.content();
-        const $ = cheerio.load(pageContent);
-        $('a[href*="-jobs-"]').each((_, el) => {
-            const href = $(el).attr('href');
-            if (href && /-jobs-\d+/i.test(href)) {
-                try {
-                    const absUrl = new URL(href, BASE_URL).href;
-                    const jobId = extractJobIdFromUrl(absUrl);
-                    if (jobId && !seenJobIds.has(jobId)) {
-                        seenJobIds.add(jobId);
-                        jobUrls.push(absUrl);
-                    }
-                } catch { }
-            }
+        const sitemapResponse = await gotScraping({
+            url: SITEMAP_URL,
+            headers: {
+                'User-Agent': getRandomUserAgent(),
+                Accept: 'application/xml,text/xml,*/*',
+            },
+            timeout: { request: 30000 },
+            retry: { limit: 2 },
         });
-        log.info(`📄 Extracted ${jobUrls.length} job URLs from initial page`);
-    } catch (err) {
-        log.warning(`Failed to extract from initial page: ${err.message}`);
-    }
 
-    // If no keyword and no startUrl, use sitemap
-    if (jobUrls.length === 0 && !startUrl && !keyword?.trim()) {
-        log.info('📥 Fetching sitemap for all jobs...');
-        try {
-            await page.goto(SITEMAP_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            const sitemapContent = await page.content();
-            const urlMatches = sitemapContent.match(/<loc>(https:\/\/www\.rozee\.pk\/[^<]+jobs-\d+)<\/loc>/gi) || [];
-            jobUrls = urlMatches
-                .map((m) => m.replace(/<\/?loc>/gi, ''))
-                .filter((url) => matchesKeyword(url, keyword))
-                .slice(0, RESULTS_WANTED);
-            log.info(`📄 Sitemap: found ${jobUrls.length} job URLs`);
-        } catch (err) {
-            log.warning(`Sitemap fetch failed: ${err.message}`);
-        }
-    }
+        if (sitemapResponse.statusCode === 200) {
+            const urlMatches = sitemapResponse.body.match(/<loc>(https:\/\/www\.rozee\.pk\/[^<]+jobs-\d+)<\/loc>/gi) || [];
+            const allUrls = urlMatches.map((m) => m.replace(/<\/?loc>/gi, ''));
 
-    // Paginate if we need more jobs
-    let currentPage = 1;
-    while (jobUrls.length < RESULTS_WANTED && currentPage < MAX_PAGES) {
-        currentPage++;
-        const nextUrl = buildSearchUrl(keyword, currentPage);
-        try {
-            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await page.waitForTimeout(800);
+            // Filter by keyword
+            for (const url of allUrls) {
+                if (jobUrls.length >= RESULTS_WANTED) break;
+                if (!matchesKeyword(url, keyword)) continue;
 
-            const pageContent = await page.content();
-            const $ = cheerio.load(pageContent);
-            let foundOnPage = 0;
-
-            $('a[href*="-jobs-"]').each((_, el) => {
-                const href = $(el).attr('href');
-                if (href && /-jobs-\d+/i.test(href)) {
-                    try {
-                        const absUrl = new URL(href, BASE_URL).href;
-                        const jobId = extractJobIdFromUrl(absUrl);
-                        if (jobId && !seenJobIds.has(jobId)) {
-                            seenJobIds.add(jobId);
-                            jobUrls.push(absUrl);
-                            foundOnPage++;
-                        }
-                    } catch { }
+                const jobId = extractJobIdFromUrl(url);
+                if (jobId && !seenJobIds.has(jobId)) {
+                    seenJobIds.add(jobId);
+                    jobUrls.push(url);
                 }
+            }
+
+            log.info(`📄 Sitemap: found ${allUrls.length} total, ${jobUrls.length} matching "${keyword || 'all'}"`);
+        }
+    } catch (err) {
+        log.warning(`Sitemap fetch failed: ${err.message}`);
+    }
+
+    // ===== STEP 2: If sitemap didn't work or need specific search, use browser =====
+    if (jobUrls.length < RESULTS_WANTED && (startUrl || keyword?.trim())) {
+        log.info('🌐 Launching browser for search pages...');
+
+        let browser;
+        try {
+            browser = await chromium.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
             });
 
-            log.info(`📄 Page ${currentPage}: found ${foundOnPage} new job URLs (total: ${jobUrls.length})`);
+            const context = await browser.newContext({
+                userAgent: getRandomUserAgent(),
+                viewport: { width: 1366, height: 768 },
+                proxy: proxyUrl ? { server: proxyUrl } : undefined,
+            });
 
-            if (foundOnPage === 0) break;
+            const page = await context.newPage();
+
+            // Block heavy resources
+            await page.route('**/*', (route) => {
+                const type = route.request().resourceType();
+                if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+                    return route.abort();
+                }
+                return route.continue();
+            });
+
+            // Navigate to first search page
+            const searchUrl = startUrl || buildSearchUrl(keyword, 1);
+            log.info(`📄 Loading: ${searchUrl}`);
+
+            try {
+                await page.goto(searchUrl, { waitUntil: 'load', timeout: 45000 });
+                await page.waitForTimeout(2000);
+
+                // Get cookies
+                const cookies = await context.cookies();
+                cookieString = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+                log.info(`🍪 Got ${cookies.length} cookies`);
+
+                // Extract job URLs from page
+                const pageContent = await page.content();
+                const $ = cheerio.load(pageContent);
+
+                $('a[href*="-jobs-"]').each((_, el) => {
+                    if (jobUrls.length >= RESULTS_WANTED) return false;
+                    const href = $(el).attr('href');
+                    if (href && /-jobs-\d+/i.test(href)) {
+                        try {
+                            const absUrl = new URL(href, BASE_URL).href;
+                            const jobId = extractJobIdFromUrl(absUrl);
+                            if (jobId && !seenJobIds.has(jobId)) {
+                                seenJobIds.add(jobId);
+                                jobUrls.push(absUrl);
+                            }
+                        } catch { }
+                    }
+                });
+
+                log.info(`� Page 1: extracted ${jobUrls.length} job URLs`);
+
+                // Paginate if needed
+                for (let pageNo = 2; pageNo <= MAX_PAGES && jobUrls.length < RESULTS_WANTED; pageNo++) {
+                    const nextUrl = buildSearchUrl(keyword, pageNo);
+                    try {
+                        await page.goto(nextUrl, { waitUntil: 'load', timeout: 30000 });
+                        await page.waitForTimeout(1500);
+
+                        const content = await page.content();
+                        const $page = cheerio.load(content);
+                        let foundOnPage = 0;
+
+                        $page('a[href*="-jobs-"]').each((_, el) => {
+                            if (jobUrls.length >= RESULTS_WANTED) return false;
+                            const href = $page(el).attr('href');
+                            if (href && /-jobs-\d+/i.test(href)) {
+                                try {
+                                    const absUrl = new URL(href, BASE_URL).href;
+                                    const jobId = extractJobIdFromUrl(absUrl);
+                                    if (jobId && !seenJobIds.has(jobId)) {
+                                        seenJobIds.add(jobId);
+                                        jobUrls.push(absUrl);
+                                        foundOnPage++;
+                                    }
+                                } catch { }
+                            }
+                        });
+
+                        log.info(`📄 Page ${pageNo}: +${foundOnPage} jobs (total: ${jobUrls.length})`);
+                        if (foundOnPage === 0) break;
+                    } catch (err) {
+                        log.warning(`Page ${pageNo} failed: ${err.message}`);
+                        break;
+                    }
+                }
+            } catch (err) {
+                log.warning(`Browser navigation failed: ${err.message}`);
+            }
+
+            await browser.close();
         } catch (err) {
-            log.warning(`Pagination error on page ${currentPage}: ${err.message}`);
-            break;
+            log.error(`Browser error: ${err.message}`);
+            if (browser) await browser.close().catch(() => { });
         }
     }
 
-    // Close browser - we have cookies now
-    await browser.close();
-    log.info('🔒 Browser closed. Switching to fast HTTP requests...');
+    if (jobUrls.length === 0) {
+        log.error('❌ No job URLs found. Exiting.');
+        return;
+    }
 
-    // ===== STEP 2: Use got-scraping with cookies for fast detail fetching =====
+    log.info(`🔒 Collected ${jobUrls.length} job URLs. Fetching details with got-scraping...`);
+
+    // ===== STEP 3: Fetch job details with got-scraping =====
     const headers = {
         'User-Agent': getRandomUserAgent(),
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
-        Cookie: cookieString,
+        Cookie: cookieString || '',
         Connection: 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
     };
 
     let saved = 0;
     const urlsToProcess = jobUrls.slice(0, RESULTS_WANTED);
 
-    log.info(`⚡ Fetching ${urlsToProcess.length} job details with got-scraping...`);
-
     for (const jobUrl of urlsToProcess) {
         if (saved >= RESULTS_WANTED) break;
 
         try {
-            await randomDelay(100, 300);
+            await randomDelay(150, 400);
 
             const response = await gotScraping({
                 url: jobUrl,
                 headers,
                 proxyUrl: proxyUrl || undefined,
-                timeout: { request: 15000 },
+                timeout: { request: 20000 },
                 retry: { limit: 2 },
             });
 
@@ -317,7 +345,10 @@ Actor.main(async () => {
                 valid_through: jsonLdData.valid_through,
             };
 
-            if (!merged.title) continue;
+            if (!merged.title) {
+                log.debug(`No title: ${jobUrl}`);
+                continue;
+            }
 
             const job = {
                 source: 'rozee.pk',
@@ -342,7 +373,7 @@ Actor.main(async () => {
                 log.info(`💾 Saved ${saved}/${RESULTS_WANTED} jobs`);
             }
         } catch (err) {
-            log.debug(`Error fetching ${jobUrl}: ${err.message}`);
+            log.debug(`Error: ${jobUrl} - ${err.message}`);
         }
     }
 

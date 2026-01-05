@@ -1,11 +1,13 @@
 {
     "name": "rozeepk-jobs-scraper",
     "version": "2.0.0",
-    "description": "Fast RozeePk jobs scraper with sitemap support and JSON-LD extraction.",
+    "description": "Fast RozeePk jobs scraper with hybrid Playwright + got-scraping approach.",
     "type": "module",
     "dependencies": {
         "apify": "^3.5.2",
         "crawlee": "^3.15.3",
+        "cheerio": "^1.0.0-rc.12",
+        "got-scraping": "^4.0.0",
         "playwright": "1.56.1"
     },
     "devDependencies": {
